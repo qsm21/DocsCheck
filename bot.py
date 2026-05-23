@@ -261,6 +261,13 @@ async def handle_document_upload(message: Message, state: FSMContext):
         print(f"Error handling file upload: {e}")
         await processing_msg.edit_text(f"❌ Произошла ошибка во время обработки файла: {str(e)}")
 
+# Handler for documents sent outside of FSM state
+@router.message(F.photo | F.document)
+async def handle_document_outside_state(message: Message):
+    await message.answer(
+        "ℹ️ Пожалуйста, сначала введите команду /check или /start, чтобы начать сессию проверки документов."
+    )
+
 # Search CRM by first tourist data and link booking
 async def search_crm_and_link(state: FSMContext, message: Message, first_tourist: dict, status_msg: Message):
     payload = {
@@ -420,6 +427,8 @@ dp.include_router(router)
 
 async def main():
     print("Starting Telegram Bot...")
+    # Delete webhook to make sure polling works
+    await bot.delete_webhook(drop_pending_updates=True)
     # Start polling
     await dp.start_polling(bot)
 
