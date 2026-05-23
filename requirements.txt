@@ -1,0 +1,6 @@
+aiogram>=3.0.0
+google-genai
+pdf2image
+pillow
+httpx
+python-dotenv
