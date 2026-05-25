@@ -67,6 +67,18 @@ def replace_homoglyphs(s: str) -> str:
 def transliterate(s: str) -> str:
     return "".join(RU_TO_LATIN.get(c, c) for c in s)
 
+# KZ passport numbers may contain country prefix KAZN or KAZ — strip it
+def normalize_passport_number(num: Optional[str]) -> str:
+    if not num:
+        return ""
+    upper = num.upper().strip()
+    # Remove leading KAZN or KAZ (Kazakhstan country code prefix)
+    for prefix in ("KAZN", "KAZ"):
+        if upper.startswith(prefix):
+            upper = upper[len(prefix):]
+            break
+    return upper
+
 def normalize_name(s: Optional[str]) -> str:
     if not s:
         return ""
@@ -105,6 +117,25 @@ def find_matching_crm_tourist(scan, crm_tourists):
             return ct
             
     return None
+
+def new_check_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard with a button to start a new verification."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Новая проверка", callback_data="new_check")]
+    ])
+
+# Callback: start new check via inline button
+@router.callback_query(F.data == "new_check")
+async def cb_new_check(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await state.set_state(PassportStates.WAITING_FOR_FILES)
+    await state.update_data(passports=[], booking_id=None, crm_tourists=[], booking_info=None)
+    await callback.message.answer(
+        "🔄 Сессия сброшена. Готов к новой проверке!\n\n"
+        "📥 Отправьте файлы загранпаспортов туристов (JPG, PNG или PDF)."
+    )
 
 # Command Handlers
 @router.message(Command("start"))
@@ -209,6 +240,15 @@ async def handle_document_upload(message: Message, state: FSMContext):
             passport_data = gemini_client.extract_passport_data(img)
             if passport_data:
                 p_dict = passport_data.model_dump()
+                
+                # Normalize passport number: strip KAZ/KAZN country prefix
+                raw_num = p_dict.get("passport_number") or ""
+                normalized_num = normalize_passport_number(raw_num)
+                if normalized_num != raw_num:
+                    warnings.append(
+                        f"ℹ️ Номер паспорта **{raw_num}** — убран префикс страны, используется **{normalized_num}**."
+                    )
+                p_dict["passport_number"] = normalized_num
                 
                 # Check for Cyrillic homoglyphs in Latin name fields
                 has_homoglyphs = False
@@ -386,41 +426,55 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{config.CRM_API_URL}/booking/validate", json=payload, headers=headers, timeout=20.0)
+        
+        # Always log the raw CRM response for debugging
+        print(f"[validate] HTTP {response.status_code} | body: {response.text[:500]}")
             
         if response.status_code != 200:
-            await message.answer(f"❌ Ошибка финальной сверки ({response.status_code}): {response.text}")
+            await message.answer(
+                f"❌ Ошибка финальной сверки (HTTP {response.status_code}):\n`{response.text[:300]}`",
+                parse_mode="Markdown"
+            )
             return
             
         res_data = response.json()
         status = res_data.get("status")
         
         if status == "ok":
+            await state.clear()
             await message.answer(
                 "🟢 **Сверка успешна!**\n\n"
                 "Все паспортные данные идеально совпали с карточками в CRM.\n"
                 "Статус заявки изменен на «Сверено», чекбокс проверки активирован.\n"
                 "Системная запись добавлена в историю сделки.",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=new_check_keyboard()
             )
-            # Reset state for next verification
-            await state.clear()
         elif status == "error":
             errors = res_data.get("errors", [])
             errors_str = "\n".join([f"• {e}" for e in errors])
+            await state.clear()
             await message.answer(
                 "🔴 **Обнаружены опечатки или расхождения в данных!**\n\n"
                 f"{errors_str}\n\n"
                 "⚠️ Автоматически создана задача на исправление в CRM (с дедлайном +2 часа для менеджера).\n"
-                "Пожалуйста, скорректируйте данные туриста в CRM и запустите проверку заново с помощью кнопки /check.",
-                parse_mode="Markdown"
+                "Скорректируйте данные в CRM и нажмите кнопку ниже для повторной проверки.",
+                parse_mode="Markdown",
+                reply_markup=new_check_keyboard()
             )
-            await state.clear()
         else:
-            await message.answer(f"❌ Неизвестный ответ от API: {response.text}")
+            await message.answer(
+                f"❌ Неизвестный ответ от API:\n`{response.text[:300]}`",
+                parse_mode="Markdown",
+                reply_markup=new_check_keyboard()
+            )
             
     except Exception as e:
         print(f"Error executing final validation: {e}")
-        await message.answer(f"❌ Ошибка связи при валидации: {str(e)}")
+        await message.answer(
+            f"❌ Ошибка связи при валидации: {str(e)}",
+            reply_markup=new_check_keyboard()
+        )
 
 # Include router in dp
 dp.include_router(router)
