@@ -16,6 +16,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 import config
 import gemini_client
 
+# CRM web URL for direct booking links
+CRM_WEB_URL = "https://crm.aqtravel.kz"
+
 # Check config variables
 if not config.TELEGRAM_BOT_TOKEN or not config.GEMINI_API_KEY:
     print("CRITICAL: Bot token or Gemini API key missing. Exiting.", file=sys.stderr)
@@ -118,11 +121,16 @@ def find_matching_crm_tourist(scan, crm_tourists):
             
     return None
 
-def new_check_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard with a button to start a new verification."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Новая проверка", callback_data="new_check")]
-    ])
+def new_check_keyboard(booking_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Inline keyboard with a button to start a new verification.
+    Optionally includes a direct CRM link for the current booking.
+    """
+    buttons = []
+    if booking_id:
+        crm_url = f"{CRM_WEB_URL}/dashboard?booking={booking_id}"
+        buttons.append([InlineKeyboardButton(text="🔗 Открыть заявку в CRM", url=crm_url)])
+    buttons.append([InlineKeyboardButton(text="🔄 Новая проверка", callback_data="new_check")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # Callback: start new check via inline button
 @router.callback_query(F.data == "new_check")
@@ -174,10 +182,13 @@ async def process_booking_selection(callback: CallbackQuery, state: FSMContext):
     )
     
     await callback.message.edit_reply_markup(reply_markup=None)
+    crm_url = f"{CRM_WEB_URL}/dashboard?booking={booking_id}"
     await callback.message.answer(
         f"🔗 Сессия привязана к заявке **№{selected_b['booking_number']}** ({selected_b['country']} | вылет {selected_b['departure_at']}).\n"
         f"Заказчик: {selected_b['client_name']}.\n"
-        f"Отель: {selected_b['hotel']}."
+        f"Отель: {selected_b['hotel']}.\n"
+        f"[🔗 Открыть в CRM]({crm_url})",
+        parse_mode="Markdown"
     )
     
     # Run verification check
@@ -346,10 +357,13 @@ async def search_crm_and_link(state: FSMContext, message: Message, first_tourist
                 booking_info=selected_b
             )
             await status_msg.delete()
+            crm_url = f"{CRM_WEB_URL}/dashboard?booking={selected_b['booking_id']}"
             await message.answer(
                 f"🔗 Автоматическая привязка к заявке **№{selected_b['booking_number']}** ({selected_b['country']} | вылет {selected_b['departure_at']}).\n"
                 f"Заказчик: {selected_b['client_name']}.\n"
-                f"Отель: {selected_b['hotel']}."
+                f"Отель: {selected_b['hotel']}.\n"
+                f"[🔗 Открыть в CRM]({crm_url})",
+                parse_mode="Markdown"
             )
             await run_composition_and_validation(state, message)
         else:
@@ -448,7 +462,7 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
                 "Статус заявки изменен на «Сверено», чекбокс проверки активирован.\n"
                 "Системная запись добавлена в историю сделки.",
                 parse_mode="Markdown",
-                reply_markup=new_check_keyboard()
+                reply_markup=new_check_keyboard(booking_id)
             )
         elif status == "error":
             errors = res_data.get("errors", [])
@@ -460,13 +474,13 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
                 "⚠️ Автоматически создана задача на исправление в CRM (с дедлайном +2 часа для менеджера).\n"
                 "Скорректируйте данные в CRM и нажмите кнопку ниже для повторной проверки.",
                 parse_mode="Markdown",
-                reply_markup=new_check_keyboard()
+                reply_markup=new_check_keyboard(booking_id)
             )
         else:
             await message.answer(
                 f"❌ Неизвестный ответ от API:\n`{response.text[:300]}`",
                 parse_mode="Markdown",
-                reply_markup=new_check_keyboard()
+                reply_markup=new_check_keyboard(booking_id)
             )
             
     except Exception as e:
