@@ -11,7 +11,16 @@ from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, TelegramObject
+from aiogram.types import (
+    Message, 
+    CallbackQuery, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    TelegramObject,
+    BotCommand,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
 
 import config
 import gemini_client
@@ -121,6 +130,14 @@ def find_matching_crm_tourist(scan, crm_tourists):
             
     return None
 
+def main_keyboard() -> ReplyKeyboardMarkup:
+    """Обычная клавиатура под полем ввода с кнопкой Сбросить/Начать проверку"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔄 Начать новую проверку")]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
 def new_check_keyboard(booking_id: Optional[int] = None) -> InlineKeyboardMarkup:
     """Inline keyboard with a button to start a new verification.
     Optionally includes a direct CRM link for the current booking.
@@ -128,7 +145,7 @@ def new_check_keyboard(booking_id: Optional[int] = None) -> InlineKeyboardMarkup
     buttons = []
     if booking_id:
         crm_url = f"{CRM_WEB_URL}/dashboard?booking={booking_id}"
-        buttons.append([InlineKeyboardButton(text="🔗 Открыть заявку в CRM", url=crm_url)])
+        buttons.append([InlineKeyboardButton(text="🔗 Открыть в CRM", url=crm_url)])
     buttons.append([InlineKeyboardButton(text="🔄 Новая проверка", callback_data="new_check")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -141,8 +158,23 @@ async def cb_new_check(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PassportStates.WAITING_FOR_FILES)
     await state.update_data(passports=[], booking_id=None, crm_tourists=[], booking_info=None)
     await callback.message.answer(
-        "🔄 Сессия сброшена. Готов к новой проверке!\n\n"
-        "📥 Отправьте файлы загранпаспортов туристов (JPG, PNG или PDF)."
+        "🔄 <b>Сессия сброшена.</b> Бот готов к новой проверке!\n\n"
+        "📥 Отправьте файлы загранпаспортов туристов (<b>JPG, PNG или PDF</b>).",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+# Handle text reply button "Начать новую проверку"
+@router.message(F.text == "🔄 Начать новую проверку")
+async def btn_new_check(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(PassportStates.WAITING_FOR_FILES)
+    await state.update_data(passports=[], booking_id=None, crm_tourists=[], booking_info=None)
+    await message.answer(
+        "🔄 <b>Сессия сброшена.</b> Бот готов к новой проверке!\n\n"
+        "📥 Отправьте файлы загранпаспортов туристов (<b>JPG, PNG или PDF</b>).",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
     )
 
 # Command Handlers
@@ -153,9 +185,11 @@ async def cmd_check(message: Message, state: FSMContext):
     await state.set_state(PassportStates.WAITING_FOR_FILES)
     await state.update_data(passports=[], booking_id=None, crm_tourists=[], booking_info=None)
     await message.answer(
-        "👋 Привет! Я бот для сверки паспортных данных с CRM.\n\n"
-        "📥 Отправьте мне файлы загранпаспортов туристов (в формате JPG, PNG или многостраничного PDF), "
-        "и я распознаю их с помощью Gemini и сверю с CRM-системой."
+        "👋 <b>Привет! Я бот для сверки паспортных данных с CRM.</b>\n\n"
+        "📥 Отправьте мне файлы загранпаспортов туристов (в формате <b>JPG, PNG или многостраничного PDF</b>).\n\n"
+        "⚡ Бот автоматически определит eGov PDF или фото и сверит данные с системой.",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
     )
 
 # Callback handler for selecting booking from CRM list
@@ -170,7 +204,10 @@ async def process_booking_selection(callback: CallbackQuery, state: FSMContext):
     # Find details of selected booking
     selected_b = next((b for b in bookings_list if b["booking_id"] == booking_id), None)
     if not selected_b:
-        await callback.message.answer("❌ Ошибка: Выбранная заявка не найдена. Попробуйте еще раз с помощью /check.")
+        await callback.message.answer(
+            "❌ <b>Ошибка:</b> Выбранная заявка не найдена. Нажмите кнопку внизу или введите /check.",
+            parse_mode="HTML"
+        )
         return
     
     # Save selection details
@@ -184,11 +221,13 @@ async def process_booking_selection(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     crm_url = f"{CRM_WEB_URL}/dashboard?booking={booking_id}"
     await callback.message.answer(
-        f"🔗 Сессия привязана к заявке **№{selected_b['booking_number']}** ({selected_b['country']} | вылет {selected_b['departure_at']}).\n"
-        f"Заказчик: {selected_b['client_name']}.\n"
-        f"Отель: {selected_b['hotel']}.\n"
-        f"[🔗 Открыть в CRM]({crm_url})",
-        parse_mode="Markdown"
+        f"🔗 <b>Сессия успешно привязана к заявке №{selected_b['booking_number']}</b>\n"
+        f"📍 Страна: <b>{selected_b['country']}</b>\n"
+        f"📅 Вылет: <b>{selected_b['departure_at']}</b>\n"
+        f"👤 Заказчик: <b>{selected_b['client_name']}</b>\n"
+        f"🏨 Отель: <b>{selected_b['hotel']}</b>\n\n"
+        f"🧭 <a href='{crm_url}'>Открыть эту заявку в CRM</a>",
+        parse_mode="HTML"
     )
     
     # Run verification check
@@ -197,9 +236,10 @@ async def process_booking_selection(callback: CallbackQuery, state: FSMContext):
 # Document and Photo upload handlers
 @router.message(PassportStates.WAITING_FOR_FILES, F.photo | F.document)
 async def handle_document_upload(message: Message, state: FSMContext):
-    processing_msg = await message.answer("⌛ Скачиваю файл и запускаю распознавание через Gemini...")
+    processing_msg = await message.answer("⌛ Скачиваю файл и запускаю распознавание...")
     
     pil_images = []
+    extracted_passports_direct = []
     
     try:
         if message.photo:
@@ -217,15 +257,36 @@ async def handle_document_upload(message: Message, state: FSMContext):
             file_bytes = await bot.download_file(file_info.file_path)
             
             if "pdf" in mime or doc.file_name.lower().endswith(".pdf"):
-                # Save PDF to temporary file, then convert pages to images
+                # Save PDF to temporary file
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                     tmp.write(file_bytes.read())
                     tmp_path = tmp.name
-                    
-                # Convert PDF pages to PIL Images
-                pages = convert_from_path(tmp_path)
-                pil_images.extend(pages)
-                
+
+                # Try text extraction first (eGov KZ PDFs with selectable text)
+                pdf_text = gemini_client.extract_text_from_pdf(tmp_path)
+                if pdf_text and len(pdf_text) > 50:
+                    # Text layer found — parse without Gemini
+                    await processing_msg.edit_text("⚡ <b>Обнаружен цифровой eGov PDF!</b>\nИзвлекаю данные напрямую без OCR...")
+                    passport_data = gemini_client.parse_egov_passport_text(pdf_text)
+                    if passport_data:
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        # Use existing processing pipeline with extracted data
+                        pil_images = [None]  # Sentinel to signal text-mode
+                        extracted_passports_direct = [passport_data]
+                    else:
+                        # Text found but could not parse — fall back to OCR
+                        pages = convert_from_path(tmp_path)
+                        pil_images.extend(pages)
+                        extracted_passports_direct = []
+                else:
+                    # No text layer — use OCR via Gemini
+                    pages = convert_from_path(tmp_path)
+                    pil_images.extend(pages)
+                    extracted_passports_direct = []
+
                 # Cleanup temp file
                 try:
                     os.remove(tmp_path)
@@ -234,19 +295,28 @@ async def handle_document_upload(message: Message, state: FSMContext):
             elif "image" in mime or doc.file_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                 pil_images.append(Image.open(io.BytesIO(file_bytes.read())))
             else:
-                await processing_msg.edit_text("❌ Формат файла не поддерживается. Отправьте JPG, PNG или PDF.")
+                await processing_msg.edit_text("❌ <b>Формат файла не поддерживается.</b>\nОтправьте JPG, PNG или PDF.")
                 return
 
         if not pil_images:
             await processing_msg.edit_text("❌ Не удалось извлечь изображение из файла.")
             return
 
-        # Perform OCR via Gemini
+        # Perform OCR via Gemini (or use directly extracted text passports)
         extracted_passports = []
         warnings = []
+
+        # If text extraction succeeded — skip OCR loop entirely
+        if extracted_passports_direct:
+            extracted_passports = [p.model_dump() for p in extracted_passports_direct]
+        else:
+            extracted_passports_direct = []
+
         for i, img in enumerate(pil_images):
+            if img is None:  # Sentinel: skip OCR for text-mode PDFs
+                continue
             if len(pil_images) > 1:
-                await processing_msg.edit_text(f"⌛ Распознаю страницу {i+1} из {len(pil_images)}...")
+                await processing_msg.edit_text(f"⌛ Распознаю страницу <b>{i+1}</b> из <b>{len(pil_images)}</b> через Gemini...")
             
             passport_data = gemini_client.extract_passport_data(img)
             if passport_data:
@@ -257,7 +327,7 @@ async def handle_document_upload(message: Message, state: FSMContext):
                 normalized_num = normalize_passport_number(raw_num)
                 if normalized_num != raw_num:
                     warnings.append(
-                        f"ℹ️ Номер паспорта **{raw_num}** — убран префикс страны, используется **{normalized_num}**."
+                        f"ℹ️ Номер паспорта <b>{raw_num}</b> — убран префикс страны, используется <b>{normalized_num}</b>."
                     )
                 p_dict["passport_number"] = normalized_num
                 
@@ -271,13 +341,13 @@ async def handle_document_upload(message: Message, state: FSMContext):
                 
                 if has_homoglyphs:
                     warnings.append(
-                        f"⚠️ В имени/фамилии **{p_dict['last_name_latin']} {p_dict['first_name_latin']}** были обнаружены русские буквы, замаскированные под латинские (опечатка или ошибка распознавания). Они были автоматически заменены на латинские."
+                        f"⚠️ В имени/фамилии <b>{p_dict['last_name_latin']} {p_dict['first_name_latin']}</b> были обнаружены русские буквы, замаскированные под латинские. Они были автоматически заменены."
                     )
                 
                 extracted_passports.append(p_dict)
 
         if not extracted_passports:
-            await processing_msg.edit_text("❌ Gemini не удалось распознать паспортные данные на этом файле. Попробуйте отправить более четкое изображение.")
+            await processing_msg.edit_text("❌ <b>Gemini не удалось распознать паспортные данные.</b>\nПопробуйте прислать более четкое изображение.")
             return
 
         # Save to state
@@ -293,11 +363,11 @@ async def handle_document_upload(message: Message, state: FSMContext):
         await state.update_data(passports=current_passports)
         
         # Format list of successfully extracted tourists
-        new_tourists_str = "\n".join([f"👤 **{p['last_name_latin']} {p['first_name_latin']}** (ИИН: {p.get('iin') or 'нет'})" for p in extracted_passports])
-        msg_text = f"✅ Распознано новых паспортов ({len(extracted_passports)}):\n{new_tourists_str}"
+        new_tourists_str = "\n".join([f"👤 <b>{p['last_name_latin']} {p['first_name_latin']}</b> (ИИН: <code>{p.get('iin') or 'нет'}</code>)" for p in extracted_passports])
+        msg_text = f"✅ <b>Распознано новых паспортов ({len(extracted_passports)}):</b>\n{new_tourists_str}"
         if warnings:
             msg_text += "\n\n" + "\n".join(warnings)
-        await message.answer(msg_text)
+        await message.answer(msg_text, parse_mode="HTML")
         
         # If booking is not linked yet, search CRM
         booking_id = data.get("booking_id")
@@ -316,7 +386,9 @@ async def handle_document_upload(message: Message, state: FSMContext):
 @router.message(F.photo | F.document)
 async def handle_document_outside_state(message: Message):
     await message.answer(
-        "ℹ️ Пожалуйста, сначала введите команду /check или /start, чтобы начать сессию проверки документов."
+        "ℹ️ Пожалуйста, нажмите кнопку <b>🔄 Начать новую проверку</b> ниже, чтобы запустить сессию проверки документов.",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
     )
 
 # Search CRM by first tourist data and link booking
@@ -345,8 +417,10 @@ async def search_crm_and_link(state: FSMContext, message: Message, first_tourist
         
         if len(bookings) == 0:
             await status_msg.edit_text(
-                f"ℹ️ Не найдено ни одной активной заявки для туриста **{first_tourist['last_name_latin']} {first_tourist['first_name_latin']}**.\n"
-                "Убедитесь, что заявка заведена в CRM, находится в работе и дата вылета актуальна. Вы можете сбросить сессию командой /check."
+                f"🔍 <b>Не найдено активных заявок</b> для туриста <b>{first_tourist['last_name_latin']} {first_tourist['first_name_latin']}</b>.\n\n"
+                "Убедитесь, что заявка создана в CRM, находится в работе и дата вылета актуальна.\n\n"
+                "Вы можете сбросить сессию кнопкой <b>🔄 Начать новую проверку</b>.",
+                parse_mode="HTML"
             )
         elif len(bookings) == 1:
             # Bind automatically
@@ -359,11 +433,12 @@ async def search_crm_and_link(state: FSMContext, message: Message, first_tourist
             await status_msg.delete()
             crm_url = f"{CRM_WEB_URL}/dashboard?booking={selected_b['booking_id']}"
             await message.answer(
-                f"🔗 Автоматическая привязка к заявке **№{selected_b['booking_number']}** ({selected_b['country']} | вылет {selected_b['departure_at']}).\n"
-                f"Заказчик: {selected_b['client_name']}.\n"
-                f"Отель: {selected_b['hotel']}.\n"
-                f"[🔗 Открыть в CRM]({crm_url})",
-                parse_mode="Markdown"
+                f"🔗 <b>Автоматическая привязка к заявке №{selected_b['booking_number']}</b>\n"
+                f"📍 Страна: <b>{selected_b['country']}</b> | Вылет: <b>{selected_b['departure_at']}</b>\n"
+                f"👤 Заказчик: <b>{selected_b['client_name']}</b>\n"
+                f"🏨 Отель: <b>{selected_b['hotel']}</b>\n\n"
+                f"🧭 <a href='{crm_url}'>Открыть заявку в CRM</a>",
+                parse_mode="HTML"
             )
             await run_composition_and_validation(state, message)
         else:
@@ -373,14 +448,15 @@ async def search_crm_and_link(state: FSMContext, message: Message, first_tourist
             
             keyboard_buttons = []
             for b in bookings:
-                btn_text = f"Заявка №{b['booking_number']} | {b['country']} | {b['departure_at']}"
+                btn_text = f"№{b['booking_number']} | {b['country']} | {b['departure_at']}"
                 keyboard_buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"booking:{b['booking_id']}")])
                 
             markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
             await status_msg.delete()
             await message.answer(
-                f"❓ Данный турист найден в нескольких активных заявках ({len(bookings)}). Выберите нужную для проверки:",
-                reply_markup=markup
+                f"❓ Данный турист найден в <b>{len(bookings)}</b> активных заявках. Выберите нужную для сверки:",
+                reply_markup=markup,
+                parse_mode="HTML"
             )
             
     except Exception as e:
@@ -408,7 +484,12 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
             
     if extra_scans:
         extra_names = ", ".join([f"{p['last_name_latin']} {p['first_name_latin']}" for p in extra_scans])
-        await message.answer(f"⚠️ **Ошибка!** Турист(ы) **{extra_names}** не числятся в заявке №{booking_info['booking_number']}. Проверьте файлы документов.")
+        await message.answer(
+            f"⚠️ <b>Ошибка состава туристов!</b>\n"
+            f"Турист(ы) <b>{extra_names}</b> не числятся в заявке №{booking_info['booking_number']}.\n\n"
+            f"Проверьте правильность отправленных файлов.",
+            parse_mode="HTML"
+        )
         
         # Clean extra passports from session to prevent faulty validation submission
         clean_passports = [p for p in scanned_passports if p not in extra_scans]
@@ -419,11 +500,12 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
     missing_tourists = [ct for ct in crm_tourists if ct["id"] not in matched_crm_tourist_ids]
     
     if missing_tourists:
-        missing_names = ", ".join([f"**{t['last_name_latin'] or t['last_name']} {t['first_name_latin'] or t['first_name']}**" for t in missing_tourists])
+        missing_names = ", ".join([f"<b>{t['last_name_latin'] or t['last_name']} {t['first_name_latin'] or t['first_name']}</b>" for t in missing_tourists])
         await message.answer(
-            f"📋 В заявке числится туристов: **{len(crm_tourists)}**, но вы прислали только **{len(scanned_passports)}**.\n\n"
-            f"Пожалуйста, догрузите паспорт для: {missing_names}.\n\n"
-            f"📥 Ожидаю файл..."
+            f"📋 В CRM-заявке туристов: <b>{len(crm_tourists)}</b>, но получено документов только: <b>{len(scanned_passports)}</b>.\n\n"
+            f"⌛ <b>Ожидаю паспорт для:</b> {missing_names}\n\n"
+            f"📥 Дошлите следующий файл...",
+            parse_mode="HTML"
         )
         return
         
@@ -446,8 +528,8 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
             
         if response.status_code != 200:
             await message.answer(
-                f"❌ Ошибка финальной сверки (HTTP {response.status_code}):\n`{response.text[:300]}`",
-                parse_mode="Markdown"
+                f"❌ <b>Ошибка финальной сверки (HTTP {response.status_code}):</b>\n<code>{response.text[:300]}</code>",
+                parse_mode="HTML"
             )
             return
             
@@ -479,13 +561,13 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
                         c_scan = "".join(c for c in c_scan if c.isalnum())
                     
                     if c_crm == c_scan:
-                        return f"• {field_name}: `{val_crm or '—'}` ✅"
+                        return f"• {field_name}: <code>{val_crm or '—'}</code> ✅"
                     else:
-                        return f"• {field_name}: ❌ CRM `{val_crm or '—'}` ↔️ Паспорт `{val_scan or '—'}`"
+                        return f"• {field_name}: ❌ CRM <code>{val_crm or '—'}</code> ↔️ Паспорт <code>{val_scan or '—'}</code>"
                 
                 tourist_name = f"{ct.get('last_name_latin') or ct.get('last_name') or ''} {ct.get('first_name_latin') or ct.get('first_name') or ''}".strip().upper()
                 report_parts.append(
-                    f"👤 **{tourist_name}**:\n"
+                    f"👤 <b>{tourist_name}</b>:\n"
                     f"{comp('Фамилия (lat)', ct.get('last_name_latin'), matched_scan.get('last_name_latin'), is_name=True)}\n"
                     f"{comp('Имя (lat)', ct.get('first_name_latin'), matched_scan.get('first_name_latin'), is_name=True)}\n"
                     f"{comp('Номер паспорта', ct.get('passport_number'), matched_scan.get('passport_number'))}\n"
@@ -494,35 +576,38 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
                 )
             else:
                 tourist_name = f"{ct.get('last_name') or ''} {ct.get('first_name') or ''}".strip().upper()
-                report_parts.append(f"👤 **{tourist_name}**:\n• ❌ Отсутствует скан паспорта!")
+                report_parts.append(f"👤 <b>{tourist_name}</b>:\n• ❌ Отсутствует скан паспорта!")
         
         comparison_str = "\n\n".join(report_parts)
         
         if status == "ok":
             await state.clear()
             await message.answer(
-                "🟢 **Сверка успешна!**\n"
+                "🟢 <b>Сверка успешна!</b>\n\n"
                 "Все паспортные данные идеально совпали с карточками в CRM.\n\n"
                 f"{comparison_str}\n\n"
                 "Статус заявки изменен на «Сверено», чекбокс проверки активирован.\n"
-                "Системная запись добавлена в историю сделки.",
-                parse_mode="Markdown",
+                "История сделки обновлена.",
+                parse_mode="HTML",
                 reply_markup=new_check_keyboard(booking_id)
             )
         elif status == "error":
+            errors = res_data.get("errors", [])
+            errors_str = "\n".join([f"• {e}" for e in errors])
             await state.clear()
             await message.answer(
-                "🔴 **Обнаружены опечатки или расхождения в данных!**\n\n"
+                "🔴 <b>Обнаружены расхождения в данных!</b>\n\n"
                 f"{comparison_str}\n\n"
-                "⚠️ Автоматически создана задача на исправление в CRM (с дедлайном +2 часа для менеджера).\n"
+                f"<b>Ошибки сверки:</b>\n{errors_str}\n\n"
+                "⚠️ Автоматически создана задача на исправление в CRM (с дедлайном 2 часа).\n"
                 "Скорректируйте данные в CRM и нажмите кнопку ниже для повторной проверки.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=new_check_keyboard(booking_id)
             )
         else:
             await message.answer(
-                f"❌ Неизвестный ответ от API:\n`{response.text[:300]}`",
-                parse_mode="Markdown",
+                f"❌ <b>Неизвестный ответ от API:</b>\n<code>{response.text[:300]}</code>",
+                parse_mode="HTML",
                 reply_markup=new_check_keyboard(booking_id)
             )
             
@@ -538,6 +623,13 @@ dp.include_router(router)
 
 async def main():
     print("Starting Telegram Bot...")
+    
+    # Регистрация меню команд в Telegram
+    await bot.set_my_commands([
+        BotCommand(command="check", description="🔄 Начать/сбросить сверку документов"),
+        BotCommand(command="start", description="👋 Перезапустить бота")
+    ])
+    
     # Delete webhook to make sure polling works
     await bot.delete_webhook(drop_pending_updates=True)
     # Start polling
