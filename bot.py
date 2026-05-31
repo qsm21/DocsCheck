@@ -572,6 +572,7 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
                     f"{comp('Имя (lat)', ct.get('first_name_latin'), matched_scan.get('first_name_latin'), is_name=True)}\n"
                     f"{comp('Номер паспорта', ct.get('passport_number'), matched_scan.get('passport_number'))}\n"
                     f"{comp('ИИН', ct.get('iin'), matched_scan.get('iin'))}\n"
+                    f"{comp('Дата рождения', ct.get('birth_date'), matched_scan.get('birth_date'))}\n"
                     f"{comp('Срок действия', ct.get('passport_expires_at'), matched_scan.get('passport_expires_at'))}"
                 )
             else:

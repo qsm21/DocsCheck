@@ -14,6 +14,7 @@ class PassportData(BaseModel):
     passport_number: str = Field(description="Passport number containing only letters and numbers, without spaces or symbols")
     passport_issued_at: str = Field(default="", description="Date of issue in YYYY-MM-DD format if visible, otherwise empty string")
     passport_expires_at: str = Field(default="", description="Date of expiry in YYYY-MM-DD format if visible, otherwise empty string")
+    birth_date: str = Field(default="", description="Date of birth in YYYY-MM-DD format if visible, otherwise empty string")
 
 # Initialize Gemini Client
 client = genai.Client(api_key=config.GEMINI_API_KEY)
@@ -23,7 +24,7 @@ def extract_passport_data(image: Image.Image) -> Optional[PassportData]:
         # Prompt for Gemini Vision
         prompt = (
             "Распознай данные заграничного паспорта владельца. "
-            "Извлеки: имя латиницей, фамилию латиницей, ИИН (12 цифр), номер паспорта, дату выдачи и дату окончания действия."
+            "Извлеки: имя латиницей, фамилию латиницей, ИИН (12 цифр), номер паспорта, дату рождения, дату выдачи и дату окончания действия."
         )
 
         system_instruction = (
@@ -84,10 +85,50 @@ def parse_egov_passport_text(text: str) -> Optional[PassportData]:
         # Даты в формате DD.MM.YYYY или YYYY-MM-DD
         dates = re.findall(r'\b(\d{2}\.\d{2}\.\d{4})\b', text)
         def to_iso(d):
+            if not d:
+                return ''
             parts = d.split('.')
             return f'{parts[2]}-{parts[1]}-{parts[0]}'
-        issued_at = to_iso(dates[0]) if len(dates) > 0 else ''
-        expires_at = to_iso(dates[1]) if len(dates) > 1 else ''
+
+        # Try to find dates by label
+        def find_date_by_patterns(patterns, text):
+            for pat in patterns:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m:
+                    return m.group(1)
+            return None
+
+        dob_str = find_date_by_patterns([
+            r'(?:дата\s+рождения|date\s+of\s+birth|туған\s+күні)\D*(\d{2}\.\d{2}\.\d{4})',
+            r'(?:рождения|birth|туған)\D*(\d{2}\.\d{2}\.\d{4})'
+        ], text)
+
+        issued_str = find_date_by_patterns([
+            r'(?:дата\s+выдачи|date\s+of\s+issue|берілген\s+күні)\D*(\d{2}\.\d{2}\.\d{4})',
+            r'(?:выдачи|issue|берілген)\D*(\d{2}\.\d{2}\.\d{4})'
+        ], text)
+
+        expires_str = find_date_by_patterns([
+            r'(?:срок\s+действия|date\s+of\s+expiry|действителен\s+до|мерзімі)\D*(\d{2}\.\d{2}\.\d{4})',
+            r'(?:действия|expiry|мерзімі)\D*(\d{2}\.\d{2}\.\d{4})'
+        ], text)
+
+        # Fallback to positional matching if labels are not found
+        if not dob_str and len(dates) >= 3:
+            dob_str = dates[0]
+            if not issued_str:
+                issued_str = dates[1]
+            if not expires_str:
+                expires_str = dates[2]
+        elif len(dates) == 2:
+            if not issued_str:
+                issued_str = dates[0]
+            if not expires_str:
+                expires_str = dates[1]
+
+        birth_date = to_iso(dob_str)
+        issued_at = to_iso(issued_str)
+        expires_at = to_iso(expires_str)
 
         # Имя и фамилия латиницей (строки из заглавных латинских букв длиной > 2)
         latin_names = re.findall(r'\b([A-Z]{2,})\b', text)
@@ -108,6 +149,7 @@ def parse_egov_passport_text(text: str) -> Optional[PassportData]:
             passport_number=passport_number,
             passport_issued_at=issued_at,
             passport_expires_at=expires_at,
+            birth_date=birth_date,
         )
     except Exception as e:
         print(f'eGov parse error: {e}')
