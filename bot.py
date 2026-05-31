@@ -454,23 +454,66 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
         res_data = response.json()
         status = res_data.get("status")
         
+        # Build comparative report
+        report_parts = []
+        for ct in crm_tourists:
+            # Find matching scan
+            matched_scan = None
+            crm_iin = "".join(c for c in (ct.get("iin") or "") if c.isdigit())
+            if crm_iin:
+                matched_scan = next((s for s in scanned_passports if "".join(c for c in (s.get("iin") or "") if c.isdigit()) == crm_iin), None)
+            if not matched_scan:
+                crm_last = normalize_name(ct.get("last_name_latin") or transliterate(ct.get("last_name") or ""))
+                crm_first = normalize_name(ct.get("first_name_latin") or transliterate(ct.get("first_name") or ""))
+                matched_scan = next((s for s in scanned_passports if normalize_name(s.get("last_name_latin")) == crm_last and normalize_name(s.get("first_name_latin")) == crm_first), None)
+            
+            if matched_scan:
+                def comp(field_name, val_crm, val_scan, is_name=False):
+                    c_crm = (val_crm or "").strip().upper()
+                    c_scan = (val_scan or "").strip().upper()
+                    if is_name:
+                        c_crm = normalize_name(val_crm)
+                        c_scan = normalize_name(val_scan)
+                    else:
+                        c_crm = "".join(c for c in c_crm if c.isalnum())
+                        c_scan = "".join(c for c in c_scan if c.isalnum())
+                    
+                    if c_crm == c_scan:
+                        return f"• {field_name}: `{val_crm or '—'}` ✅"
+                    else:
+                        return f"• {field_name}: ❌ CRM `{val_crm or '—'}` ↔️ Паспорт `{val_scan or '—'}`"
+                
+                tourist_name = f"{ct.get('last_name_latin') or ct.get('last_name') or ''} {ct.get('first_name_latin') or ct.get('first_name') or ''}".strip().upper()
+                report_parts.append(
+                    f"👤 **{tourist_name}**:\n"
+                    f"{comp('Фамилия (lat)', ct.get('last_name_latin'), matched_scan.get('last_name_latin'), is_name=True)}\n"
+                    f"{comp('Имя (lat)', ct.get('first_name_latin'), matched_scan.get('first_name_latin'), is_name=True)}\n"
+                    f"{comp('Номер паспорта', ct.get('passport_number'), matched_scan.get('passport_number'))}\n"
+                    f"{comp('ИИН', ct.get('iin'), matched_scan.get('iin'))}\n"
+                    f"{comp('Срок действия', ct.get('passport_expires_at'), matched_scan.get('passport_expires_at'))}"
+                )
+            else:
+                tourist_name = f"{ct.get('last_name') or ''} {ct.get('first_name') or ''}".strip().upper()
+                report_parts.append(f"👤 **{tourist_name}**:\n• ❌ Отсутствует скан паспорта!")
+        
+        comparison_str = "\n\n".join(report_parts)
+        
         if status == "ok":
             await state.clear()
             await message.answer(
-                "🟢 **Сверка успешна!**\n\n"
-                "Все паспортные данные идеально совпали с карточками в CRM.\n"
+                "🟢 **Сверка успешна!**\n"
+                "Все паспортные данные идеально совпали с карточками в CRM.\n\n"
+                f"{comparison_str}\n\n"
                 "Статус заявки изменен на «Сверено», чекбокс проверки активирован.\n"
                 "Системная запись добавлена в историю сделки.",
                 parse_mode="Markdown",
                 reply_markup=new_check_keyboard(booking_id)
             )
         elif status == "error":
-            errors = res_data.get("errors", [])
-            errors_str = "\n".join([f"• {e}" for e in errors])
             await state.clear()
             await message.answer(
                 "🔴 **Обнаружены опечатки или расхождения в данных!**\n\n"
-                f"{errors_str}\n\n"
+                f"{comparison_str}\n\n"
                 "⚠️ Автоматически создана задача на исправление в CRM (с дедлайном +2 часа для менеджера).\n"
                 "Скорректируйте данные в CRM и нажмите кнопку ниже для повторной проверки.",
                 parse_mode="Markdown",
