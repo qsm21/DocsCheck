@@ -236,6 +236,11 @@ async def process_booking_selection(callback: CallbackQuery, state: FSMContext):
 # Document and Photo upload handlers
 @router.message(PassportStates.WAITING_FOR_FILES, F.photo | F.document)
 async def handle_document_upload(message: Message, state: FSMContext):
+    # Increment active uploads count to track concurrent processing
+    data = await state.get_data()
+    active_uploads = data.get("active_uploads", 0) + 1
+    await state.update_data(active_uploads=active_uploads)
+
     processing_msg = await message.answer("⌛ Скачиваю файл и запускаю распознавание...")
     
     pil_images = []
@@ -368,19 +373,29 @@ async def handle_document_upload(message: Message, state: FSMContext):
         if warnings:
             msg_text += "\n\n" + "\n".join(warnings)
         await message.answer(msg_text, parse_mode="HTML")
-        
-        # If booking is not linked yet, search CRM
-        booking_id = data.get("booking_id")
-        if not booking_id:
-            await processing_msg.edit_text("🔍 Ищу подходящие активные заявки в CRM...")
-            await search_crm_and_link(state, message, extracted_passports[0], processing_msg)
-        else:
-            await processing_msg.delete()
-            await run_composition_and_validation(state, message)
 
     except Exception as e:
         print(f"Error handling file upload: {e}")
         await processing_msg.edit_text(f"❌ Произошла ошибка во время обработки файла: {str(e)}")
+        return
+    finally:
+        # Decrement active uploads count
+        data = await state.get_data()
+        active_uploads = max(0, data.get("active_uploads", 1) - 1)
+        await state.update_data(active_uploads=active_uploads)
+
+    # Reload state data to get the latest passports and booking info
+    data = await state.get_data()
+    
+    # If booking is not linked yet, search CRM
+    booking_id = data.get("booking_id")
+    if not booking_id:
+        await processing_msg.edit_text("🔍 Ищу подходящие активные заявки в CRM...")
+        await search_crm_and_link(state, message, extracted_passports[0], processing_msg)
+    else:
+        await processing_msg.delete()
+        await run_composition_and_validation(state, message)
+
 
 # Handler for documents sent outside of FSM state
 @router.message(F.photo | F.document)
@@ -466,6 +481,11 @@ async def search_crm_and_link(state: FSMContext, message: Message, first_tourist
 # Perform Composition Check and Validate details
 async def run_composition_and_validation(state: FSMContext, message: Message):
     data = await state.get_data()
+    active_uploads = data.get("active_uploads", 0)
+    if active_uploads > 0:
+        # Do not run composition check or validation while concurrent file uploads are still processing
+        return
+
     scanned_passports = data.get("passports", [])
     crm_tourists = data.get("crm_tourists", [])
     booking_info = data.get("booking_info", {})
@@ -544,32 +564,47 @@ async def run_composition_and_validation(state: FSMContext, message: Message):
             crm_iin = "".join(c for c in (ct.get("iin") or "") if c.isdigit())
             if crm_iin:
                 matched_scan = next((s for s in scanned_passports if "".join(c for c in (s.get("iin") or "") if c.isdigit()) == crm_iin), None)
+            
+            # Fallback to transliterated names if Latin names not filled in CRM
+            crm_last = ct.get("last_name_latin")
+            crm_first = ct.get("first_name_latin")
+            if not crm_last:
+                crm_last = transliterate(ct.get("last_name") or "")
+            if not crm_first:
+                crm_first = transliterate(ct.get("first_name") or "")
+                
             if not matched_scan:
-                crm_last = normalize_name(ct.get("last_name_latin") or transliterate(ct.get("last_name") or ""))
-                crm_first = normalize_name(ct.get("first_name_latin") or transliterate(ct.get("first_name") or ""))
-                matched_scan = next((s for s in scanned_passports if normalize_name(s.get("last_name_latin")) == crm_last and normalize_name(s.get("first_name_latin")) == crm_first), None)
+                crm_last_norm = normalize_name(crm_last)
+                crm_first_norm = normalize_name(crm_first)
+                matched_scan = next((s for s in scanned_passports if normalize_name(s.get("last_name_latin")) == crm_last_norm and normalize_name(s.get("first_name_latin")) == crm_first_norm), None)
             
             if matched_scan:
                 def comp(field_name, val_crm, val_scan, is_name=False):
-                    c_crm = (val_crm or "").strip().upper()
-                    c_scan = (val_scan or "").strip().upper()
+                    v_crm = (val_crm or "").strip()
+                    v_scan = (val_scan or "").strip()
+                    
+                    c_crm = v_crm.upper()
+                    c_scan = v_scan.upper()
                     if is_name:
-                        c_crm = normalize_name(val_crm)
-                        c_scan = normalize_name(val_scan)
+                        c_crm = normalize_name(v_crm)
+                        c_scan = normalize_name(v_scan)
                     else:
                         c_crm = "".join(c for c in c_crm if c.isalnum())
                         c_scan = "".join(c for c in c_scan if c.isalnum())
                     
+                    display_crm = v_crm if v_crm else "—"
+                    display_scan = v_scan if v_scan else "—"
+                    
                     if c_crm == c_scan:
-                        return f"• {field_name}: <code>{val_crm or '—'}</code> ✅"
+                        return f"• {field_name}: CRM <code>{display_crm}</code> | Паспорт <code>{display_scan}</code> — Пройдено ✅"
                     else:
-                        return f"• {field_name}: ❌ CRM <code>{val_crm or '—'}</code> ↔️ Паспорт <code>{val_scan or '—'}</code>"
+                        return f"• {field_name}: CRM <code>{display_crm}</code> | Паспорт <code>{display_scan}</code> — Ошибка ❌"
                 
-                tourist_name = f"{ct.get('last_name_latin') or ct.get('last_name') or ''} {ct.get('first_name_latin') or ct.get('first_name') or ''}".strip().upper()
+                tourist_name = f"{crm_last} {crm_first}".strip().upper()
                 report_parts.append(
                     f"👤 <b>{tourist_name}</b>:\n"
-                    f"{comp('Фамилия (lat)', ct.get('last_name_latin'), matched_scan.get('last_name_latin'), is_name=True)}\n"
-                    f"{comp('Имя (lat)', ct.get('first_name_latin'), matched_scan.get('first_name_latin'), is_name=True)}\n"
+                    f"{comp('Фамилия (lat)', crm_last, matched_scan.get('last_name_latin'), is_name=True)}\n"
+                    f"{comp('Имя (lat)', crm_first, matched_scan.get('first_name_latin'), is_name=True)}\n"
                     f"{comp('Номер паспорта', ct.get('passport_number'), matched_scan.get('passport_number'))}\n"
                     f"{comp('ИИН', ct.get('iin'), matched_scan.get('iin'))}\n"
                     f"{comp('Дата рождения', ct.get('birth_date'), matched_scan.get('birth_date'))}\n"
